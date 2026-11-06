@@ -11,7 +11,6 @@ import streamlit as st  # pyright: ignore[reportMissingImports]
 
 st.set_page_config(
     page_title="Job Acceptance Prediction System",
-    page_icon="📊",
     layout="wide",
 )
 
@@ -361,7 +360,274 @@ with st.expander("Dataset overview and preview"):
 
 
 # ============================================================
-# 6. ANALYST TASK SELECTOR
+# 6. GRADIENT BOOSTING MODEL DEMO
+# ============================================================
+
+st.divider()
+st.header("Gradient Boosting Model")
+
+if model is None:
+    st.warning(
+        "The saved pipeline was not loaded. Confirm that "
+        "`models/final_pipeline.pkl` exists and can be opened."
+    )
+else:
+    # Re-read the original CSV so the model receives its training column names.
+    model_data = load_data(str(DATA_PATH)).copy()
+
+    # The notebook trained using this feature name. Support the app CSV's alias.
+    if (
+        "years_of_experience" not in model_data.columns
+        and "experience_years" in model_data.columns
+    ):
+        model_data = model_data.rename(
+            columns={"experience_years": "years_of_experience"}
+        )
+
+    required_source_columns = [
+        "status",
+        "years_of_experience",
+        "ssc_percentage",
+        "hsc_percentage",
+        "degree_percentage",
+        "skills_match_percentage",
+        "technical_score",
+        "aptitude_score",
+        "communication_score",
+    ]
+
+    missing_source_columns = [
+        column
+        for column in required_source_columns
+        if column not in model_data.columns
+    ]
+
+    if missing_source_columns:
+        st.error(
+            "The model needs these original notebook columns: "
+            + ", ".join(f"`{column}`" for column in missing_source_columns)
+        )
+    else:
+        try:
+            # Match the notebook's data cleanup.
+            model_data = model_data.drop_duplicates(keep="first").copy()
+
+            categorical_columns = model_data.select_dtypes(
+                include=["object", "category", "string"]
+            ).columns
+
+            for column in categorical_columns:
+                model_data[column] = model_data[column].str.strip()
+
+            if "gender" in model_data.columns:
+                model_data["gender"] = model_data["gender"].str.title()
+
+            if "internship_experience" in model_data.columns:
+                model_data["internship_experience"] = (
+                    model_data["internship_experience"].str.title()
+                )
+
+            # Recreate the features engineered in the notebook.
+            model_data["experience_category"] = pd.cut(
+                model_data["years_of_experience"],
+                bins=[-1, 0, 2, 5],
+                labels=["Fresher", "Junior", "Senior"],
+            )
+
+            model_data["academic_average"] = model_data[
+                [
+                    "ssc_percentage",
+                    "hsc_percentage",
+                    "degree_percentage",
+                ]
+            ].mean(axis=1)
+
+            model_data["academic_performance_band"] = pd.cut(
+                model_data["academic_average"],
+                bins=[0, 60, 75, 100],
+                labels=["Low", "Medium", "High"],
+                include_lowest=True,
+            )
+
+            model_data["skills_match_level"] = pd.cut(
+                model_data["skills_match_percentage"],
+                bins=[0, 60, 80, 100],
+                labels=["Low", "Medium", "High"],
+                include_lowest=True,
+            )
+
+            model_data["interview_average"] = model_data[
+                [
+                    "technical_score",
+                    "aptitude_score",
+                    "communication_score",
+                ]
+            ].mean(axis=1)
+
+            model_data["interview_performance_category"] = pd.cut(
+                model_data["interview_average"],
+                bins=[0, 60, 75, 100],
+                labels=["Low", "Medium", "High"],
+                include_lowest=True,
+            )
+
+            # Match the notebook's model inputs: remove the target and
+            # the analytical-only score.
+            model_features = model_data.drop(
+                columns=["status", "placement_analytical_score"],
+                errors="ignore",
+            )
+
+            # Use the exact feature names and order recorded by the pipeline.
+            expected_features = getattr(model, "feature_names_in_", None)
+
+            if expected_features is None and hasattr(model, "named_steps"):
+                fitted_preprocessor = model.named_steps.get("preprocessor")
+                expected_features = getattr(
+                    fitted_preprocessor,
+                    "feature_names_in_",
+                    None,
+                )
+
+            if expected_features is None:
+                st.error(
+                    "The saved pipeline does not expose its expected feature "
+                    "names, so the app cannot safely match inputs to the model."
+                )
+            else:
+                expected_features = list(expected_features)
+                missing_model_features = [
+                    column
+                    for column in expected_features
+                    if column not in model_features.columns
+                ]
+
+                if missing_model_features:
+                    st.error(
+                        "The CSV is missing model features: "
+                        + ", ".join(f"`{column}`" for column in missing_model_features)
+                    )
+                else:
+                    model_features = model_features[expected_features]
+
+                    metric_columns = st.columns(5)
+                    metric_columns[0].metric("Accuracy", "90.58%")
+                    metric_columns[1].metric("Precision", "85.30%")
+                    metric_columns[2].metric("Recall", "83.21%")
+                    metric_columns[3].metric("F1 score", "84.24%")
+                    metric_columns[4].metric("ROC-AUC", "96.79%")
+
+                    st.subheader("Try a candidate prediction")
+                    candidate_number = st.number_input(
+                        "Candidate row number",
+                        min_value=1,
+                        max_value=len(model_features),
+                        value=1,
+                        step=1,
+                        key="gb_candidate_row",
+                    )
+
+                    candidate_features = model_features.iloc[
+                        [int(candidate_number) - 1]
+                    ]
+
+                    predicted_class = model.predict(candidate_features)[0]
+                    class_labels = list(model.classes_)
+
+                    positive_class_index = next(
+                        (
+                            index
+                            for index, label in enumerate(class_labels)
+                            if str(label).strip().lower()
+                            in {"1", "placed", "yes", "accepted", "true"}
+                        ),
+                        1 if len(class_labels) > 1 else 0,
+                    )
+
+                    predicted_probability = model.predict_proba(
+                        candidate_features
+                    )[0][positive_class_index]
+
+                    placed_prediction = (
+                        str(predicted_class).strip().lower()
+                        in {"1", "placed", "yes", "accepted", "true"}
+                    )
+
+                    prediction_col, probability_col = st.columns(2)
+                    prediction_col.metric(
+                        "Predicted outcome",
+                        "Placed" if placed_prediction else "Not Placed",
+                    )
+                    probability_col.metric(
+                        "Model-estimated placement probability",
+                        f"{predicted_probability:.1%}",
+                    )
+
+                    st.caption(
+                        "The row number selects a record from the dataset for "
+                        "demonstration. This prediction is not an offer-acceptance "
+                        "or offer-dropout prediction."
+                    )
+
+                    # Show global feature importance from the Gradient Boosting
+                    # classifier inside the saved pipeline.
+                    st.subheader("What influences the model overall?")
+
+                    if hasattr(model, "named_steps"):
+                        fitted_preprocessor = model.named_steps.get("preprocessor")
+                        classifier = model.named_steps.get("classifier")
+                    else:
+                        fitted_preprocessor = None
+                        classifier = None
+
+                    if (
+                        fitted_preprocessor is not None
+                        and classifier is not None
+                        and hasattr(classifier, "feature_importances_")
+                    ):
+                        feature_names = (
+                            fitted_preprocessor.get_feature_names_out()
+                        )
+                        importances = classifier.feature_importances_
+
+                        if len(feature_names) == len(importances):
+                            importance_data = pd.DataFrame(
+                                {
+                                    "Feature": feature_names,
+                                    "Importance": importances,
+                                }
+                            ).nlargest(15, "Importance").sort_values(
+                                "Importance",
+                                ascending=True,
+                            )
+
+                            importance_chart = px.bar(
+                                importance_data,
+                                x="Importance",
+                                y="Feature",
+                                orientation="h",
+                                title="Top 15 global feature importances",
+                            )
+                            st.plotly_chart(
+                                importance_chart,
+                                use_container_width=True,
+                            )
+                        else:
+                            st.info(
+                                "The pipeline's feature names do not align with "
+                                "the classifier's importance values."
+                            )
+                    else:
+                        st.info(
+                            "This saved model does not expose feature importances."
+                        )
+
+        except Exception as error:
+            st.error(f"Could not run the Gradient Boosting demo: {error}")
+
+
+# ============================================================
+# 7. ANALYST TASK SELECTOR
 # ============================================================
 
 st.divider()
@@ -385,7 +651,7 @@ selected_analysis = st.selectbox(
 
 
 # ============================================================
-# 7. ANALYSIS 1: ACADEMIC SCORES VS PLACEMENT OUTCOME
+# 8. ANALYSIS 1: ACADEMIC SCORES VS PLACEMENT OUTCOME
 # ============================================================
 
 if selected_analysis == analysis_options[1]:
@@ -435,7 +701,7 @@ if selected_analysis == analysis_options[1]:
 
 
 # ============================================================
-# 8. ANALYSIS 2: SKILLS MATCH VS INTERVIEW PERFORMANCE
+# 9. ANALYSIS 2: SKILLS MATCH VS INTERVIEW PERFORMANCE
 # ============================================================
 
 elif selected_analysis == analysis_options[2]:
@@ -475,7 +741,7 @@ elif selected_analysis == analysis_options[2]:
 
 
 # ============================================================
-# 9. ANALYSIS 3: CERTIFICATION IMPACT ON JOB ACCEPTANCE
+# 10. ANALYSIS 3: CERTIFICATION IMPACT ON JOB ACCEPTANCE
 # ============================================================
 
 elif selected_analysis == analysis_options[3]:
@@ -509,7 +775,7 @@ elif selected_analysis == analysis_options[3]:
 
 
 # ============================================================
-# 10. ANALYSIS 4: ACCEPTANCE RATE BY COMPANY TIER
+# 11. ANALYSIS 4: ACCEPTANCE RATE BY COMPANY TIER
 # ============================================================
 
 elif selected_analysis == analysis_options[4]:
@@ -547,7 +813,7 @@ elif selected_analysis == analysis_options[4]:
 
 
 # ============================================================
-# 11. ANALYSIS 5: EXPERIENCE VS PLACEMENT SUCCESS
+# 12. ANALYSIS 5: EXPERIENCE VS PLACEMENT SUCCESS
 # ============================================================
 
 elif selected_analysis == analysis_options[5]:
@@ -587,7 +853,7 @@ elif selected_analysis == analysis_options[5]:
 
 
 # ============================================================
-# 12. ANALYSIS 6: INTERVIEW SCORE VS PLACEMENT PROBABILITY
+# 13. ANALYSIS 6: INTERVIEW SCORE VS PLACEMENT PROBABILITY
 # ============================================================
 
 elif selected_analysis == analysis_options[6]:
@@ -686,7 +952,7 @@ elif selected_analysis == analysis_options[6]:
 
 
 # ============================================================
-# 13. ANALYSIS 7: EMPLOYABILITY TEST SCORE ANALYSIS
+# 14. ANALYSIS 7: EMPLOYABILITY TEST SCORE ANALYSIS
 # ============================================================
 
 elif selected_analysis == analysis_options[7]:
@@ -734,7 +1000,7 @@ elif selected_analysis == analysis_options[7]:
             )
 
 # ============================================================
-# 14. KEY KPI SELECTOR
+# 15. KEY KPI SELECTOR
 # ============================================================
 
 st.divider()
